@@ -1,0 +1,10 @@
+{
+    "name": "smart-inventory-root",
+    "private": true,
+    "scripts": {
+        "setup:frontend": "ng new frontend --style css --routing --skip-git --skip-install --defaults"
+    },
+    "devDependencies": {
+        "@angular/cli": "^17.0.0"
+    }
+}
