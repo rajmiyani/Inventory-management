@@ -27,6 +27,10 @@ const dashboardRoutes = require('./routes/dashboard.routes');
 const accountingRoutes = require('./routes/accounting.routes');
 const settingsRoutes = require('./routes/settings.routes');
 const uploadRoutes = require('./routes/upload.routes');
+const tenantRoutes = require('./routes/tenant.routes');
+const staffRoutes = require('./routes/staff.routes');
+const subscriptionRoutes = require('./routes/subscription.routes');
+const paymentRoutes = require('./routes/payment.routes');
 
 app.use('/api/auth', authRoutes);
 app.use('/api/inventory', inventoryRoutes);
@@ -37,6 +41,10 @@ app.use('/api/dashboard', dashboardRoutes);
 app.use('/api/accounting', accountingRoutes);
 app.use('/api/settings', settingsRoutes);
 app.use('/api/upload', uploadRoutes);
+app.use('/api/tenant', tenantRoutes);
+app.use('/api/staff', staffRoutes);
+app.use('/api/subscription', subscriptionRoutes);
+app.use('/api/payment', paymentRoutes);
 
 app.get('/', (req, res) => {
     res.json({ message: 'Smart Inventory API (MongoDB) is running' });

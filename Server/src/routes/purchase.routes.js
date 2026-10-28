@@ -8,10 +8,10 @@ const mongoose = require('mongoose');
 // Apply auth middleware to all purchase routes
 router.use(verifyToken);
 
-// GET all purchases
+// GET all purchases for this business
 router.get('/', async (req, res) => {
     try {
-        const purchases = await Purchase.find().sort({ date: -1 });
+        const purchases = await Purchase.find({ businessId: req.businessId }).sort({ date: -1 });
         res.json(purchases);
     } catch (error) {
         res.status(500).json({ error: error.message });
@@ -21,9 +21,13 @@ router.get('/', async (req, res) => {
 // CREATE new purchase order
 router.post('/', async (req, res) => {
     try {
-        const count = await Purchase.countDocuments();
-        const purchaseNo = `PUR-${Date.now()}-${count + 1}`;
-        const newPurchase = new Purchase({ ...req.body, purchaseNo });
+        const count = await Purchase.countDocuments({ businessId: req.businessId });
+        const purchaseNo = `PUR-${new Date().getFullYear()}-${String(count + 1).padStart(4, '0')}`;
+        const newPurchase = new Purchase({ 
+            ...req.body, 
+            businessId: req.businessId,
+            purchaseNo 
+        });
         await newPurchase.save();
         res.status(201).json(newPurchase);
     } catch (error) {
@@ -38,10 +42,16 @@ router.put('/:id/status', async (req, res) => {
 
     if (!status) return res.status(400).json({ error: 'Status is required' });
 
-    const session = await mongoose.startSession();
-    session.startTransaction();
+    let session = null;
     try {
-        const purchase = await Purchase.findById(id).session(session);
+        session = await mongoose.startSession();
+        session.startTransaction();
+    } catch (e) {
+        session = null;
+    }
+
+    try {
+        const purchase = await Purchase.findOne({ _id: id, businessId: req.businessId }).session(session);
         if (!purchase) throw new Error('Purchase order not found');
 
         // Prevent duplicate stock updates
@@ -49,11 +59,15 @@ router.put('/:id/status', async (req, res) => {
             return res.json({ message: 'Already received' });
         }
 
-        // If marking as received, increment stock
+        // If marking as received, increment stock scoped to this business
         if (status === 'Received' && purchase.status !== 'Received') {
             for (const item of purchase.items) {
+                const query = item.productId 
+                    ? { _id: item.productId, businessId: req.businessId }
+                    : { name: item.name, businessId: req.businessId };
+
                 await Product.findOneAndUpdate(
-                    { name: item.name },
+                    query,
                     { $inc: { stock: item.quantity } },
                     { session }
                 );
@@ -62,16 +76,21 @@ router.put('/:id/status', async (req, res) => {
 
         purchase.status = status;
         await purchase.save({ session });
-        await session.commitTransaction();
+
+        if (session) {
+            await session.commitTransaction();
+        }
         res.json({ id, status, message: 'Status updated successfully' });
     } catch (error) {
-        await session.abortTransaction();
+        if (session) {
+            await session.abortTransaction();
+        }
         res.status(500).json({ error: error.message });
     } finally {
-        session.endSession();
+        if (session) {
+            session.endSession();
+        }
     }
 });
-
-module.exports = router;
 
 module.exports = router;

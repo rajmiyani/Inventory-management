@@ -149,8 +149,11 @@ const ProductList = () => {
                                             </div>
                                         </td>
                                         <td className="py-4">
-                                            <div className="fw-bold text-dark h6 mb-0">₹{product.price.toFixed(2)}</div>
-                                            <div className="text-secondary text-xs">per {product.unit}</div>
+                                            <div className="fw-bold text-dark h6 mb-0 font-monospace">₹{product.price.toFixed(2)}</div>
+                                            <div className="text-secondary text-xs">
+                                                <span className="badge bg-light text-secondary border px-1.5 py-0.5 me-1">{product.taxRate || 0}% GST</span>
+                                                <span>per {product.unit || 'pcs'}</span>
+                                            </div>
                                         </td>
                                         <td className="pe-4 py-4 text-end">
                                             <div className="d-flex justify-content-end gap-2 transition-all">

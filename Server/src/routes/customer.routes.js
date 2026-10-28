@@ -6,10 +6,10 @@ const verifyToken = require('../middleware/auth.middleware');
 // Apply auth middleware to all customer routes
 router.use(verifyToken);
 
-// GET all customers
+// GET all customers for this business
 router.get('/', async (req, res) => {
     try {
-        const customers = await Customer.find().sort({ createdAt: -1 });
+        const customers = await Customer.find({ businessId: req.businessId }).sort({ createdAt: -1 });
         res.json(customers);
     } catch (error) {
         res.status(500).json({ error: error.message });
@@ -19,7 +19,10 @@ router.get('/', async (req, res) => {
 // CREATE new customer
 router.post('/', async (req, res) => {
     try {
-        const customer = new Customer(req.body);
+        const customer = new Customer({
+            ...req.body,
+            businessId: req.businessId
+        });
         await customer.save();
         res.status(201).json(customer);
     } catch (error) {
@@ -30,8 +33,30 @@ router.post('/', async (req, res) => {
 // UPDATE customer
 router.put('/:id', async (req, res) => {
     try {
-        const customer = await Customer.findByIdAndUpdate(req.params.id, req.body, { new: true });
+        const customer = await Customer.findOneAndUpdate(
+            { _id: req.params.id, businessId: req.businessId },
+            req.body,
+            { new: true }
+        );
+        if (!customer) return res.status(404).json({ error: 'Customer not found' });
         res.json(customer);
+    } catch (error) {
+        res.status(500).json({ error: error.message });
+    }
+});
+
+// Settle customer due balance (Khata payment settlement)
+router.post('/:id/settle-due', async (req, res) => {
+    try {
+        const { amount } = req.body;
+        const customer = await Customer.findOne({ _id: req.params.id, businessId: req.businessId });
+        if (!customer) return res.status(404).json({ error: 'Customer not found' });
+
+        const settleAmount = Number(amount) || 0;
+        customer.dueBalance = Math.max(0, (customer.dueBalance || 0) - settleAmount);
+        await customer.save();
+
+        res.json({ message: 'Due payment recorded', customer });
     } catch (error) {
         res.status(500).json({ error: error.message });
     }
@@ -40,7 +65,8 @@ router.put('/:id', async (req, res) => {
 // DELETE customer
 router.delete('/:id', async (req, res) => {
     try {
-        await Customer.findByIdAndDelete(req.params.id);
+        const result = await Customer.findOneAndDelete({ _id: req.params.id, businessId: req.businessId });
+        if (!result) return res.status(404).json({ error: 'Customer not found' });
         res.json({ message: 'Customer deleted' });
     } catch (error) {
         res.status(500).json({ error: error.message });

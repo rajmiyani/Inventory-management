@@ -1,7 +1,8 @@
 const mongoose = require('mongoose');
 
 const purchaseSchema = new mongoose.Schema({
-    purchaseNo: { type: String, required: true, unique: true },
+    businessId: { type: mongoose.Schema.Types.ObjectId, ref: 'Business', required: true, index: true },
+    purchaseNo: { type: String, required: true },
     date: { type: Date, default: Date.now },
     supplier: { type: String, required: true },
     items: [{
@@ -15,5 +16,7 @@ const purchaseSchema = new mongoose.Schema({
     status: { type: String, enum: ['Pending', 'Received', 'Cancelled'], default: 'Pending' },
     createdAt: { type: Date, default: Date.now }
 });
+
+purchaseSchema.index({ businessId: 1, purchaseNo: 1 }, { unique: true });
 
 module.exports = mongoose.model('Purchase', purchaseSchema);

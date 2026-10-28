@@ -11,13 +11,13 @@ import {
     ShoppingCart,
     CreditCard,
     Banknote,
-    Smartphone,
     Printer,
-    ChevronDown,
     Loader2,
     CheckCircle2,
     AlertCircle,
-    Package
+    Package,
+    ShieldCheck,
+    X
 } from 'lucide-react';
 
 const Billing = () => {
@@ -25,9 +25,10 @@ const Billing = () => {
     const [cart, setCart] = useState([]);
     const [searchTerm, setSearchTerm] = useState('');
     const [customer, setCustomer] = useState({ name: '', email: '', phone: '' });
-    const [paymentMethod, setPaymentMethod] = useState('cash');
+    const [paymentMethod, setPaymentMethod] = useState('cash'); // 'cash' or 'razorpay'
     const [loading, setLoading] = useState(false);
     const [showResults, setShowResults] = useState(false);
+    const [simulationModal, setSimulationModal] = useState(null); // { orderId, amount, keyId }
     const searchInputRef = useRef(null);
     const { showSuccess, showError, showWarning } = useToast();
 
@@ -45,16 +46,39 @@ const Billing = () => {
         }
     };
 
+    // Load Razorpay Checkout SDK
+    const loadRazorpayScript = () => {
+        return new Promise((resolve) => {
+            if (window.Razorpay) {
+                resolve(true);
+                return;
+            }
+            const script = document.createElement('script');
+            script.src = 'https://checkout.razorpay.com/v1/checkout.js';
+            script.onload = () => resolve(true);
+            script.onerror = () => resolve(false);
+            document.body.appendChild(script);
+        });
+    };
+
     const addToCart = (product) => {
         const existing = cart.find(item => item.productId === product._id);
+        const taxRate = Number(product.taxRate) || 0;
+        const price = Number(product.price) || 0;
+
         if (existing) {
             if (existing.quantity >= product.stock) {
                 showWarning(`Only ${product.stock} units available in stock!`);
                 return;
             }
+            const newQty = existing.quantity + 1;
+            const baseSubtotal = newQty * price;
+            const taxAmount = (baseSubtotal * (existing.taxRate || 0)) / 100;
+            const total = baseSubtotal + taxAmount;
+
             setCart(cart.map(item =>
                 item.productId === product._id
-                    ? { ...item, quantity: item.quantity + 1, total: (item.quantity + 1) * item.price }
+                    ? { ...item, quantity: newQty, taxAmount, total }
                     : item
             ));
         } else {
@@ -62,12 +86,19 @@ const Billing = () => {
                 showWarning('Product is currently out of stock!');
                 return;
             }
+            const baseSubtotal = price * 1;
+            const taxAmount = (baseSubtotal * taxRate) / 100;
+            const total = baseSubtotal + taxAmount;
+
             setCart([...cart, {
                 productId: product._id,
                 name: product.name,
-                price: product.price,
+                sku: product.sku || '',
+                price: price,
                 quantity: 1,
-                total: product.price
+                taxRate: taxRate,
+                taxAmount: taxAmount,
+                total: total
             }]);
         }
         setSearchTerm('');
@@ -81,24 +112,41 @@ const Billing = () => {
                 const product = products.find(p => p._id === id);
                 const newQty = item.quantity + delta;
                 if (newQty <= 0) return null;
-                if (newQty > product.stock) {
+                if (product && newQty > product.stock) {
                     showWarning('Cannot exceed available stock level');
                     return item;
                 }
-                return { ...item, quantity: newQty, total: newQty * item.price };
+                const baseSubtotal = newQty * item.price;
+                const taxAmount = (baseSubtotal * (item.taxRate || 0)) / 100;
+                const total = baseSubtotal + taxAmount;
+                return { ...item, quantity: newQty, taxAmount, total };
             }
             return item;
         }).filter(Boolean));
     };
 
-    const subtotal = cart.reduce((acc, item) => acc + item.total, 0);
-    const tax = subtotal * 0.18; // 18% GST Example
+    const updateItemTaxRate = (id, newRate) => {
+        const rate = Math.max(0, Number(newRate) || 0);
+        setCart(cart.map(item => {
+            if (item.productId === id) {
+                const baseSubtotal = item.quantity * item.price;
+                const taxAmount = (baseSubtotal * rate) / 100;
+                const total = baseSubtotal + taxAmount;
+                return { ...item, taxRate: rate, taxAmount, total };
+            }
+            return item;
+        }));
+    };
+
+    // Calculate Cart Totals
+    const subtotal = cart.reduce((acc, item) => acc + (item.price * item.quantity), 0);
+    const tax = cart.reduce((acc, item) => acc + (item.taxAmount || 0), 0);
     const total = subtotal + tax;
 
-    const handleSubmit = async () => {
-        if (cart.length === 0) return showWarning('Your cart is empty');
-        setLoading(true);
+    // Internal helper to create invoice ONLY after payment is confirmed
+    const executeInvoiceGeneration = async (paymentRefId = null) => {
         try {
+            setLoading(true);
             const res = await api.post('/billing/generate', {
                 customerName: customer.name || 'Walk-in Customer',
                 customerEmail: customer.email,
@@ -108,19 +156,139 @@ const Billing = () => {
                 tax,
                 totalAmount: total,
                 paymentMethod,
-                paymentStatus: 'paid'
+                paymentStatus: 'paid',
+                razorpayPaymentId: paymentRefId || undefined
             });
-            showSuccess('Transaction COMPLETED successfully!');
+
+            showSuccess('Transaction completed & Invoice generated successfully!');
             setCart([]);
             setCustomer({ name: '', email: '', phone: '' });
             fetchProducts(); // Refresh stock
 
-            // Auto open print view in new tab
+            // Open invoice view
             window.open(`/billing/invoice/${res.data._id}`, '_blank');
         } catch (error) {
             showError(error.response?.data?.error || 'Failed to generate invoice');
         } finally {
             setLoading(false);
+        }
+    };
+
+    // Razorpay Online Payment Flow
+    const handleRazorpayCheckout = async () => {
+        try {
+            setLoading(true);
+            // 1. Create order on backend
+            const orderRes = await api.post('/payment/create-order', {
+                amount: total,
+                currency: 'INR',
+                customerName: customer.name || 'Walk-in Customer'
+            });
+
+            const { orderId, amount, currency, keyId, isSimulation } = orderRes.data;
+
+            // In simulation mode (e.g. test environment or missing Razorpay keys)
+            if (isSimulation) {
+                setLoading(false);
+                setSimulationModal({
+                    orderId,
+                    amount: total,
+                    keyId
+                });
+                return;
+            }
+
+            // Real Live Razorpay Gateway
+            const isLoaded = await loadRazorpayScript();
+            if (!isLoaded) {
+                setLoading(false);
+                showError('Failed to load Razorpay payment gateway. Please check internet connection.');
+                return;
+            }
+
+            const options = {
+                key: keyId,
+                amount: amount,
+                currency: currency || 'INR',
+                name: 'POS Online Billing',
+                description: `Invoice for ${customer.name || 'Customer'} (Total: ₹${total.toFixed(2)})`,
+                order_id: orderId,
+                prefill: {
+                    name: customer.name || '',
+                    email: customer.email || '',
+                    contact: customer.phone || ''
+                },
+                theme: {
+                    color: '#2563EB'
+                },
+                handler: async function (response) {
+                    try {
+                        setLoading(true);
+                        // Verify payment with server
+                        const verifyRes = await api.post('/payment/verify', response);
+                        if (verifyRes.data.status === 'success') {
+                            // ONLY GENERATE INVOICE AFTER PAYMENT VERIFIED!
+                            await executeInvoiceGeneration(response.razorpay_payment_id);
+                        } else {
+                            showError('Payment verification failed. Invoice was NOT generated.');
+                        }
+                    } catch (err) {
+                        showError(err.response?.data?.error || 'Payment verification failed');
+                    } finally {
+                        setLoading(false);
+                    }
+                },
+                modal: {
+                    ondismiss: function () {
+                        setLoading(false);
+                        showWarning('Razorpay payment cancelled. No invoice was created.');
+                    }
+                }
+            };
+
+            const rzp = new window.Razorpay(options);
+            rzp.open();
+        } catch (error) {
+            setLoading(false);
+            showError(error.response?.data?.error || 'Failed to initiate Razorpay payment');
+        }
+    };
+
+    // Confirms payment in simulation mode
+    const confirmSimulationPayment = async () => {
+        if (!simulationModal) return;
+        try {
+            setLoading(true);
+            const simPaymentId = `pay_sim_${Date.now()}`;
+            // 1. Verify simulated payment
+            await api.post('/payment/verify', {
+                razorpay_order_id: simulationModal.orderId,
+                razorpay_payment_id: simPaymentId,
+                razorpay_signature: 'simulated_sig',
+                isSimulation: true
+            });
+            setSimulationModal(null);
+            // 2. Now generate invoice
+            await executeInvoiceGeneration(simPaymentId);
+        } catch (err) {
+            showError(err.response?.data?.error || 'Payment verification failed');
+            setLoading(false);
+        }
+    };
+
+    const cancelSimulationPayment = () => {
+        setSimulationModal(null);
+        showWarning('Online payment cancelled. No invoice generated.');
+    };
+
+    const handleSubmit = async () => {
+        if (cart.length === 0) return showWarning('Your cart is empty');
+
+        if (paymentMethod === 'razorpay') {
+            await handleRazorpayCheckout();
+        } else {
+            // Cash direct payment
+            await executeInvoiceGeneration();
         }
     };
 
@@ -134,11 +302,11 @@ const Billing = () => {
             <div className="d-flex justify-content-between align-items-end mb-4">
                 <div>
                     <h2 className="fw-bold text-dark mb-1">Point of Sale</h2>
-                    <p className="text-secondary mb-0">Create professional bills and manage inventory in real-time.</p>
+                    <p className="text-secondary mb-0">Create professional bills with line-item tax details and instant Razorpay payment.</p>
                 </div>
                 <div className="badge border px-3 py-2 bg-white rounded-pill shadow-sm d-flex align-items-center gap-2">
                     <div className="bg-success rounded-circle" style={{ width: 8, height: 8 }}></div>
-                    <span className="text-secondary text-xs fw-bold">Live System Sync</span>
+                    <span className="text-secondary text-xs fw-bold">Live Inventory Sync</span>
                 </div>
             </div>
 
@@ -146,7 +314,7 @@ const Billing = () => {
                 <div className="col-lg-8">
                     {/* Search & Selection */}
                     <div className="card-pro p-4 mb-4 border-0 shadow-sm">
-                        <div className="d-flex justify-content-between align-items-center mb-4">
+                        <div className="d-flex justify-content-between align-items-center mb-3">
                             <h5 className="fw-bold mb-0 d-flex align-items-center gap-2">
                                 <Search size={20} className="text-primary" />
                                 <span>Search Products</span>
@@ -162,7 +330,7 @@ const Billing = () => {
                                     ref={searchInputRef}
                                     type="text"
                                     className="form-control-pro"
-                                    placeholder="Type product name or scan SKU..."
+                                    placeholder="Type product name or scan SKU / Barcode..."
                                     value={searchTerm}
                                     onChange={(e) => {
                                         setSearchTerm(e.target.value);
@@ -181,11 +349,11 @@ const Billing = () => {
                             </div>
 
                             {showResults && filteredProducts.length > 0 && (
-                                <div className="results-dropdown shadow-xl border rounded-5 z-3 mt-2 overflow-hidden bg-white">
+                                <div className="results-dropdown shadow-xl border rounded-4 z-3 mt-2 overflow-hidden bg-white">
                                     <div className="p-2 border-bottom bg-light bg-opacity-50 text-xs fw-bold text-secondary uppercase tracking-widest px-4 py-2">
-                                        Matching Results
+                                        Matching Products ({filteredProducts.length})
                                     </div>
-                                    <div className="overflow-auto" style={{ maxHeight: '400px' }}>
+                                    <div className="overflow-auto" style={{ maxHeight: '350px' }}>
                                         {filteredProducts.map(p => (
                                             <div
                                                 key={p._id}
@@ -193,19 +361,19 @@ const Billing = () => {
                                                 onClick={() => addToCart(p)}
                                             >
                                                 <div className="d-flex align-items-center gap-3">
-                                                    <div className="bg-primary bg-opacity-5 p-2 rounded-3 text-primary">
+                                                    <div className="bg-primary bg-opacity-10 p-2 rounded-3 text-primary">
                                                         <Package size={20} />
                                                     </div>
                                                     <div>
                                                         <div className="fw-bold text-dark">{p.name}</div>
-                                                        <div className="text-secondary text-xs font-medium">
-                                                            {p.sku} • <span className={p.stock < 10 ? 'text-danger fw-bold' : ''}>{p.stock} in stock</span>
+                                                        <div className="text-secondary text-xs">
+                                                            {p.sku} • <span className={p.stock < 10 ? 'text-danger fw-bold' : ''}>{p.stock} in stock</span> • GST: {p.taxRate || 0}%
                                                         </div>
                                                     </div>
                                                 </div>
                                                 <div className="text-end">
-                                                    <div className="fw-bold text-primary h6 mb-0">₹{p.price.toFixed(2)}</div>
-                                                    <div className="text-success text-xs font-bold">+ Click to Add</div>
+                                                    <div className="fw-bold text-primary h6 mb-0 font-monospace">₹{p.price.toFixed(2)}</div>
+                                                    <div className="text-success text-xs fw-bold">+ Add to Bill</div>
                                                 </div>
                                             </div>
                                         ))}
@@ -215,51 +383,79 @@ const Billing = () => {
                         </div>
                     </div>
 
-                    {/* Cart Items */}
+                    {/* Cart Items Table */}
                     <div className="card-pro overflow-hidden d-flex flex-column border-0 shadow-sm" style={{ minHeight: '500px' }}>
                         <div className="p-4 border-bottom d-flex justify-content-between align-items-center bg-light bg-opacity-30">
                             <h5 className="mb-0 fw-bold d-flex align-items-center gap-2">
                                 <ShoppingCart size={20} className="text-primary" />
-                                <span>Current Order</span>
-                                <span className="badge bg-primary-soft text-primary rounded-pill px-3 ms-2">{cart.length}</span>
+                                <span>Current Order Items</span>
+                                <span className="badge bg-primary bg-opacity-10 text-primary rounded-pill px-3 ms-2">{cart.length}</span>
                             </h5>
-                            <button className="btn btn-light-pro btn-sm rounded-pill px-3 fw-bold text-secondary" onClick={() => setCart([])} disabled={cart.length === 0}>
+                            <button 
+                                className="btn btn-light-pro btn-sm rounded-pill px-3 fw-bold text-secondary border" 
+                                onClick={() => setCart([])} 
+                                disabled={cart.length === 0}
+                            >
                                 Clear Cart
                             </button>
                         </div>
 
                         <div className="flex-grow-1 overflow-auto p-0">
                             <table className="table table-clean-pro mb-0">
-                                <thead className="bg-light bg-opacity-50 px-4">
+                                <thead className="bg-light bg-opacity-50">
                                     <tr>
-                                        <th className="ps-4 py-3 text-xs uppercase tracking-widest text-secondary fw-bold">Description</th>
-                                        <th className="py-3 text-xs uppercase tracking-widest text-secondary fw-bold">Unit Price</th>
-                                        <th className="py-3 text-xs uppercase tracking-widest text-secondary fw-bold">Qty</th>
-                                        <th className="pe-4 text-end py-3 text-xs uppercase tracking-widest text-secondary fw-bold">Line Total</th>
+                                        <th className="ps-4 py-3 text-xs uppercase tracking-wider text-secondary fw-bold">Description</th>
+                                        <th className="py-3 text-xs uppercase tracking-wider text-secondary fw-bold">Unit Price</th>
+                                        <th className="py-3 text-xs uppercase tracking-wider text-secondary fw-bold text-center">Qty</th>
+                                        <th className="py-3 text-xs uppercase tracking-wider text-secondary fw-bold">Tax %</th>
+                                        <th className="py-3 text-xs uppercase tracking-wider text-secondary fw-bold">Price of Tax (₹)</th>
+                                        <th className="pe-4 text-end py-3 text-xs uppercase tracking-wider text-secondary fw-bold">Line Total</th>
                                         <th></th>
                                     </tr>
                                 </thead>
                                 <tbody>
                                     {cart.map(item => (
                                         <tr key={item.productId} className="border-bottom">
-                                            <td className="ps-4 py-4">
+                                            <td className="ps-4 py-3">
                                                 <div className="fw-bold text-dark">{item.name}</div>
+                                                {item.sku && <div className="text-secondary text-xs">SKU: {item.sku}</div>}
                                             </td>
-                                            <td className="py-4 text-secondary font-medium">₹{item.price.toFixed(2)}</td>
-                                            <td className="py-4">
-                                                <div className="qty-control">
-                                                    <button onClick={() => updateQuantity(item.productId, -1)} className="qty-btn ripple">
-                                                        <Minus size={14} />
+                                            <td className="py-3 text-secondary font-monospace">
+                                                ₹{item.price.toFixed(2)}
+                                            </td>
+                                            <td className="py-3 text-center">
+                                                <div className="qty-control mx-auto">
+                                                    <button onClick={() => updateQuantity(item.productId, -1)} className="qty-btn">
+                                                        <Minus size={13} />
                                                     </button>
-                                                    <span className="qty-val">{item.quantity}</span>
-                                                    <button onClick={() => updateQuantity(item.productId, 1)} className="qty-btn ripple">
-                                                        <Plus size={14} />
+                                                    <span className="qty-val font-monospace">{item.quantity}</span>
+                                                    <button onClick={() => updateQuantity(item.productId, 1)} className="qty-btn">
+                                                        <Plus size={13} />
                                                     </button>
                                                 </div>
                                             </td>
-                                            <td className="pe-4 text-end py-4 fw-bold text-dark h6 mb-0">₹{item.total.toFixed(2)}</td>
+                                            <td className="py-3">
+                                                <select 
+                                                    className="form-select form-select-sm py-1 px-2 border rounded-3 text-xs fw-semibold"
+                                                    style={{ width: '82px' }}
+                                                    value={item.taxRate}
+                                                    onChange={(e) => updateItemTaxRate(item.productId, e.target.value)}
+                                                >
+                                                    <option value="0">0%</option>
+                                                    <option value="5">5%</option>
+                                                    <option value="12">12%</option>
+                                                    <option value="18">18%</option>
+                                                    <option value="28">28%</option>
+                                                </select>
+                                            </td>
+                                            <td className="py-3 font-monospace text-primary fw-semibold">
+                                                +₹{item.taxAmount.toFixed(2)}
+                                            </td>
+                                            <td className="pe-4 text-end py-3 fw-bold text-dark font-monospace h6 mb-0">
+                                                ₹{item.total.toFixed(2)}
+                                            </td>
                                             <td className="text-end pe-4">
-                                                <button onClick={() => updateQuantity(item.productId, -item.quantity)} className="btn-icon-danger">
+                                                <button onClick={() => updateQuantity(item.productId, -item.quantity)} className="btn-icon-danger" title="Remove item">
                                                     <Trash2 size={16} />
                                                 </button>
                                             </td>
@@ -267,12 +463,12 @@ const Billing = () => {
                                     ))}
                                     {cart.length === 0 && (
                                         <tr>
-                                            <td colSpan="5" className="text-center py-5">
+                                            <td colSpan="7" className="text-center py-5">
                                                 <div className="mb-3 opacity-25">
-                                                    <ShoppingCart size={64} className="text-primary" />
+                                                    <ShoppingCart size={54} className="text-primary" />
                                                 </div>
-                                                <h5 className="text-secondary fw-bold">No items in cart</h5>
-                                                <p className="text-secondary text-sm">Scan a product or use the search bar to get started.</p>
+                                                <h6 className="text-secondary fw-bold">Cart is empty</h6>
+                                                <p className="text-secondary text-xs">Search for a product or scan barcode to add line items.</p>
                                             </td>
                                         </tr>
                                     )}
@@ -281,13 +477,13 @@ const Billing = () => {
                         </div>
 
                         {cart.length > 0 && (
-                            <div className="p-4 bg-primary bg-opacity-5 border-top d-flex justify-content-between align-items-center mt-auto">
-                                <div className="text-secondary text-sm fw-bold uppercase tracking-widest d-flex align-items-center gap-2">
+                            <div className="p-4 bg-light border-top d-flex justify-content-between align-items-center mt-auto">
+                                <div className="text-secondary text-xs fw-bold uppercase tracking-wider d-flex align-items-center gap-2">
                                     <CheckCircle2 size={18} className="text-success" />
-                                    <span>{cart.reduce((a, b) => a + b.quantity, 0)} Units Verified</span>
+                                    <span>{cart.reduce((a, b) => a + b.quantity, 0)} Units in cart</span>
                                 </div>
-                                <div className="h4 mb-0 fw-bold text-primary tracking-tighter">
-                                    Subtotal: ₹{subtotal.toFixed(2)}
+                                <div className="h5 mb-0 fw-bold text-dark font-monospace">
+                                    Base Subtotal: ₹{subtotal.toFixed(2)}
                                 </div>
                             </div>
                         )}
@@ -296,82 +492,104 @@ const Billing = () => {
 
                 <div className="col-lg-4">
                     {/* Customer Info Card */}
-                    <div className="card-pro p-4 mb-4 border-0 shadow-sm overflow-hidden position-relative">
-                        <div className="bg-primary h-1 w-100 position-absolute top-0 start-0"></div>
-                        <h5 className="mb-4 d-flex align-items-center gap-2 fw-bold pt-1">
+                    <div className="card-pro p-4 mb-4 border-0 shadow-sm">
+                        <h5 className="mb-3 d-flex align-items-center gap-2 fw-bold">
                             <UserPlus size={20} className="text-primary" />
-                            <span>Customer Profile</span>
+                            <span>Customer Details</span>
                         </h5>
-                        <div className="mb-2">
-                            <div className="input-group-clean mb-3">
-                                <input
-                                    type="text"
-                                    className="form-control-custom"
-                                    placeholder="Full Name (Optional)"
-                                    value={customer.name}
-                                    onChange={(e) => setCustomer({ ...customer, name: e.target.value })}
-                                />
-                            </div>
-                            <div className="input-group-clean">
-                                <input
-                                    type="text"
-                                    className="form-control-custom"
-                                    placeholder="Mobile Number"
-                                    value={customer.phone}
-                                    onChange={(e) => setCustomer({ ...customer, phone: e.target.value })}
-                                />
-                            </div>
+                        <div className="d-flex flex-column gap-2.5">
+                            <input
+                                type="text"
+                                className="form-control-custom"
+                                placeholder="Customer Name (Optional)"
+                                value={customer.name}
+                                onChange={(e) => setCustomer({ ...customer, name: e.target.value })}
+                            />
+                            <input
+                                type="text"
+                                className="form-control-custom"
+                                placeholder="Mobile Number"
+                                value={customer.phone}
+                                onChange={(e) => setCustomer({ ...customer, phone: e.target.value })}
+                            />
+                            <input
+                                type="email"
+                                className="form-control-custom"
+                                placeholder="Email (for Digital Receipt)"
+                                value={customer.email}
+                                onChange={(e) => setCustomer({ ...customer, email: e.target.value })}
+                            />
                         </div>
                     </div>
 
-                    {/* Order Summary Card */}
+                    {/* Order Summary & Payment Mode Card */}
                     <div className="card-pro p-4 border-0 shadow-sm bg-gradient-light">
                         <h5 className="mb-4 d-flex align-items-center gap-2 fw-bold">
                             <Receipt size={20} className="text-primary" />
-                            <span>Order Summary</span>
+                            <span>Payment & Checkout</span>
                         </h5>
+
                         <div className="d-flex justify-content-between mb-2">
-                            <span className="text-secondary fw-bold uppercase tracking-widest text-xs opacity-75">Subtotal</span>
-                            <span className="fw-bold text-dark">₹{subtotal.toFixed(2)}</span>
+                            <span className="text-secondary fw-semibold text-xs text-uppercase tracking-wider">Subtotal (Excl. Tax)</span>
+                            <span className="fw-bold text-dark font-monospace">₹{subtotal.toFixed(2)}</span>
                         </div>
                         <div className="d-flex justify-content-between mb-2">
-                            <span className="text-secondary fw-bold uppercase tracking-widest text-xs opacity-75">Tax (GST 18%)</span>
-                            <span className="fw-bold text-dark">₹{tax.toFixed(2)}</span>
+                            <span className="text-secondary fw-semibold text-xs text-uppercase tracking-wider">Price of Tax (Total GST)</span>
+                            <span className="fw-bold text-primary font-monospace">+₹{tax.toFixed(2)}</span>
                         </div>
-                        <div className="d-flex justify-content-between align-items-end mt-4 mb-4 pt-4 border-top">
-                            <span className="text-secondary fw-bold uppercase tracking-widest text-xs opacity-75 mb-2">Total Amount Payable</span>
-                            <span className="display-5 fw-bold text-primary tracking-tighter">₹{total.toFixed(2)}</span>
+                        <div className="d-flex justify-content-between align-items-end mt-4 mb-4 pt-3 border-top">
+                            <div>
+                                <span className="text-secondary fw-bold text-xs uppercase tracking-wider d-block">Grand Total</span>
+                                <span className="text-xs text-muted">Includes item tax rates</span>
+                            </div>
+                            <span className="display-6 fw-bold text-primary tracking-tight font-monospace">₹{total.toFixed(2)}</span>
                         </div>
 
-                        <label className="text-secondary text-xs font-bold uppercase tracking-widest mb-3 d-block">Select Payment Method</label>
-                        <div className="d-flex gap-3 mb-5 mt-4">
-                            <button
-                                type="button"
+                        <label className="text-secondary text-xs fw-bold uppercase tracking-wider mb-2 d-block">
+                            Select Payment Method
+                        </label>
+
+                        <div className="d-flex flex-column gap-2 mb-4">
+                            {/* Cash Option */}
+                            <div 
                                 onClick={() => setPaymentMethod('cash')}
-                                className={`btn-payment ${paymentMethod === 'cash' ? 'active' : ''}`}
+                                className={`p-3 rounded-4 border d-flex align-items-center gap-3 cursor-pointer transition-all ${paymentMethod === 'cash' ? 'border-primary bg-primary bg-opacity-5' : 'bg-white'}`}
                             >
-                                <div className="payment-icon">
-                                    <Banknote size={24} />
+                                <div className={`p-2.5 rounded-3 ${paymentMethod === 'cash' ? 'bg-primary text-white' : 'bg-light text-secondary'}`}>
+                                    <Banknote size={22} />
                                 </div>
-                                <div className="d-flex flex-column">
-                                    <span className="fw-bold">Cash Payment</span>
-                                    <span className="text-xs opacity-75">Pay with paper money</span>
+                                <div className="flex-grow-1">
+                                    <div className="fw-bold text-dark text-sm">Cash Payment</div>
+                                    <div className="text-secondary text-xs">Direct paper currency / cash register</div>
                                 </div>
-                            </button>
-                            <button
-                                type="button"
-                                onClick={() => setPaymentMethod('card')}
-                                className={`btn-payment ${paymentMethod === 'card' ? 'active' : ''}`}
+                                {paymentMethod === 'cash' && <CheckCircle2 size={18} className="text-primary" />}
+                            </div>
+
+                            {/* Razorpay Online Option */}
+                            <div 
+                                onClick={() => setPaymentMethod('razorpay')}
+                                className={`p-3 rounded-4 border d-flex align-items-center gap-3 cursor-pointer transition-all ${paymentMethod === 'razorpay' ? 'border-primary bg-primary bg-opacity-5' : 'bg-white'}`}
                             >
-                                <div className="payment-icon">
-                                    <Smartphone size={24} />
+                                <div className={`p-2.5 rounded-3 ${paymentMethod === 'razorpay' ? 'bg-primary text-white' : 'bg-light text-secondary'}`}>
+                                    <CreditCard size={22} />
                                 </div>
-                                <div className="d-flex flex-column">
-                                    <span className="fw-bold">Digital / UPI</span>
-                                    <span className="text-xs opacity-75">PhonePe, GPay, Card</span>
+                                <div className="flex-grow-1">
+                                    <div className="fw-bold text-dark text-sm d-flex align-items-center gap-2">
+                                        <span>Razorpay Online</span>
+                                        <span className="badge bg-primary text-white px-2 py-0.5 rounded-pill text-xs">UPI / Card</span>
+                                    </div>
+                                    <div className="text-secondary text-xs">Generate invoice ONLY after verified payment</div>
                                 </div>
-                            </button>
+                                {paymentMethod === 'razorpay' && <CheckCircle2 size={18} className="text-primary" />}
+                            </div>
                         </div>
+
+                        {paymentMethod === 'razorpay' && (
+                            <div className="alert alert-warning py-2.5 px-3 text-xs mb-4 rounded-3 d-flex align-items-center gap-2">
+                                <ShieldCheck size={18} className="text-warning flex-shrink-0" />
+                                <span><b>Secure Protocol:</b> Bill & direct invoice are blocked until online payment succeeds.</span>
+                            </div>
+                        )}
 
                         <button
                             onClick={handleSubmit}
@@ -379,11 +597,16 @@ const Billing = () => {
                             disabled={loading || cart.length === 0}
                         >
                             {loading ? (
-                                <Loader2 className="animate-spin" size={24} />
+                                <Loader2 className="animate-spin" size={22} />
+                            ) : paymentMethod === 'razorpay' ? (
+                                <>
+                                    <CreditCard size={20} />
+                                    <span>Pay ₹{total.toFixed(2)} with Razorpay</span>
+                                </>
                             ) : (
                                 <>
-                                    <Receipt size={22} />
-                                    <span>Complete & Print Invoice</span>
+                                    <Receipt size={20} />
+                                    <span>Complete Cash Sale & Print Bill</span>
                                 </>
                             )}
                         </button>
@@ -391,10 +614,72 @@ const Billing = () => {
                 </div>
             </div>
 
+            {/* Razorpay Simulation Modal for Offline / Test Environment */}
+            {simulationModal && (
+                <div className="position-fixed top-0 start-0 w-100 h-100 d-flex justify-content-center align-items-center bg-dark bg-opacity-50 p-3" style={{ zIndex: 1050 }}>
+                    <div className="bg-white rounded-4 p-4 shadow-xl border w-100" style={{ maxWidth: '440px' }}>
+                        <div className="d-flex justify-content-between align-items-center mb-3">
+                            <div className="d-flex align-items-center gap-2">
+                                <div className="p-2 bg-primary bg-opacity-10 text-primary rounded-3">
+                                    <CreditCard size={24} />
+                                </div>
+                                <div>
+                                    <h6 className="fw-bold text-dark mb-0">Razorpay Online Gateway</h6>
+                                    <span className="text-xs text-secondary">POS Online Checkout</span>
+                                </div>
+                            </div>
+                            <button onClick={cancelSimulationPayment} className="btn btn-sm btn-light border p-1 rounded-circle">
+                                <X size={16} />
+                            </button>
+                        </div>
+
+                        <div className="p-3 bg-light rounded-3 mb-3">
+                            <div className="d-flex justify-content-between mb-1 text-xs">
+                                <span className="text-secondary">Customer:</span>
+                                <span className="fw-semibold text-dark">{customer.name || 'Walk-in Customer'}</span>
+                            </div>
+                            <div className="d-flex justify-content-between mb-1 text-xs">
+                                <span className="text-secondary">Subtotal (Excl. Tax):</span>
+                                <span className="fw-semibold text-dark font-monospace">₹{subtotal.toFixed(2)}</span>
+                            </div>
+                            <div className="d-flex justify-content-between mb-1 text-xs">
+                                <span className="text-secondary">Price of Tax:</span>
+                                <span className="fw-semibold text-primary font-monospace">+₹{tax.toFixed(2)}</span>
+                            </div>
+                            <div className="d-flex justify-content-between border-top pt-2 mt-2">
+                                <span className="fw-bold text-dark text-sm">Total Payable:</span>
+                                <span className="fw-bold text-primary font-monospace h6 mb-0">₹{simulationModal.amount.toFixed(2)}</span>
+                            </div>
+                        </div>
+
+                        <div className="alert alert-info py-2 px-3 text-xs mb-4 rounded-3 d-flex align-items-center gap-2">
+                            <AlertCircle size={16} className="text-info flex-shrink-0" />
+                            <span>Invoice is blocked until you confirm payment below.</span>
+                        </div>
+
+                        <div className="d-flex gap-2">
+                            <button
+                                onClick={cancelSimulationPayment}
+                                className="btn btn-light border flex-1 py-2.5 rounded-3 fw-bold text-secondary text-sm"
+                            >
+                                Cancel / Decline
+                            </button>
+                            <button
+                                onClick={confirmSimulationPayment}
+                                className="btn btn-primary flex-1 py-2.5 rounded-3 fw-bold d-flex align-items-center justify-content-center gap-2 text-sm shadow-sm"
+                            >
+                                <CheckCircle2 size={16} />
+                                <span>Confirm Payment</span>
+                            </button>
+                        </div>
+                    </div>
+                </div>
+            )}
+
             <style>{`
                 .card-pro {
                     background: white;
-                    border-radius: 28px;
+                    border-radius: 24px;
                     transition: all 0.3s ease;
                 }
                 .input-group-pro {
@@ -409,7 +694,7 @@ const Billing = () => {
                 .input-group-pro:focus-within {
                     background: white;
                     border-color: var(--primary);
-                    box-shadow: 0 0 0 4px rgba(139, 92, 246, 0.1);
+                    box-shadow: 0 0 0 4px rgba(37, 99, 235, 0.1);
                 }
                 .input-group-icon { padding: 0 15px; }
                 .form-control-pro {
@@ -426,7 +711,7 @@ const Billing = () => {
                     position: absolute;
                     width: 100%;
                     background: white;
-                    box-shadow: 0 25px 50px -12px rgba(0,0,0,0.15);
+                    box-shadow: 0 20px 40px -10px rgba(0,0,0,0.12);
                     border-radius: 20px;
                 }
                 
@@ -435,12 +720,12 @@ const Billing = () => {
                     align-items: center;
                     background: #F1F5F9;
                     border-radius: 50px;
-                    padding: 4px;
+                    padding: 3px;
                     width: fit-content;
                 }
                 .qty-btn {
-                    width: 28px;
-                    height: 28px;
+                    width: 26px;
+                    height: 26px;
                     border-radius: 50%;
                     border: none;
                     background: white;
@@ -452,25 +737,26 @@ const Billing = () => {
                     transition: all 0.2s;
                 }
                 .qty-btn:hover { background: var(--primary); color: white; }
-                .qty-val { padding: 0 12px; font-weight: 800; color: #1E293B; font-size: 0.9rem; }
+                .qty-val { padding: 0 10px; font-weight: 700; color: #1E293B; font-size: 0.85rem; }
                 
                 .btn-icon-danger {
-                    background: rgba(239, 68, 68, 0.05);
+                    background: rgba(239, 68, 68, 0.08);
                     color: #EF4444;
                     border: none;
-                    padding: 10px;
-                    border-radius: 12px;
+                    padding: 8px;
+                    border-radius: 10px;
                     transition: all 0.2s;
                 }
-                .btn-icon-danger:hover { background: #EF4444; color: white; transform: rotate(8deg); }
+                .btn-icon-danger:hover { background: #EF4444; color: white; }
                 
                 .form-control-custom {
                     width: 100%;
                     background: #F8FAFC;
                     border: 1px solid #E2E8F0;
-                    padding: 14px 20px;
-                    border-radius: 14px;
+                    padding: 12px 16px;
+                    border-radius: 12px;
                     font-weight: 600;
+                    font-size: 0.9rem;
                     transition: all 0.2s;
                 }
                 .form-control-custom:focus {
@@ -479,68 +765,25 @@ const Billing = () => {
                     outline: none;
                 }
                 
-                .btn-payment {
-                    flex: 1;
-                    padding: 1.25rem;
-                    border-radius: 20px;
-                    border: 2px solid #F1F5F9;
-                    background: white;
-                    display: flex;
-                    flex-direction: column;
-                    align-items: center;
-                    gap: 0.75rem;
-                    transition: all 0.3s cubic-bezier(0.4, 0, 0.2, 1);
-                    color: #64748B;
-                    text-decoration: none;
-                }
-                .btn-payment:hover {
-                    border-color: var(--primary-soft);
-                    background: #F8FAFC;
-                    transform: translateY(-2px);
-                }
-                .btn-payment.active {
-                    border-color: var(--primary);
-                    background: var(--primary-soft);
-                    color: var(--primary);
-                    box-shadow: 0 10px 20px -5px rgba(139, 92, 246, 0.15);
-                }
-                .btn-payment.active i, .btn-payment.active svg {
-                    transform: scale(1.1);
-                }
-                .payment-icon {
-                    width: 48px;
-                    height: 48px;
-                    display: flex;
-                    align-items: center;
-                    justify-content: center;
-                    border-radius: 14px;
-                    background: #F8FAFC;
-                    transition: all 0.2s;
-                }
-                .btn-payment.active .payment-icon {
-                    background: white;
-                    box-shadow: 0 4px 10px rgba(0,0,0,0.05);
-                }
-                
                 .btn-pay-complete {
                     width: 100%;
-                    padding: 18px;
+                    padding: 16px;
                     background: var(--primary);
                     color: white;
                     border: none;
-                    border-radius: 20px;
+                    border-radius: 18px;
                     display: flex;
                     align-items: center;
                     justify-content: center;
-                    gap: 12px;
-                    font-weight: 800;
-                    font-size: 1.1rem;
-                    transition: all 0.3s;
+                    gap: 10px;
+                    font-weight: 700;
+                    font-size: 1rem;
+                    transition: all 0.2s ease;
                 }
                 .btn-pay-complete:hover:not(:disabled) {
-                    background: #7C3AED;
+                    filter: brightness(1.08);
                     transform: translateY(-2px);
-                    box-shadow: 0 15px 30px rgba(139, 92, 246, 0.3);
+                    box-shadow: 0 12px 24px rgba(37, 99, 235, 0.25);
                 }
                 .btn-pay-complete:disabled { opacity: 0.5; cursor: not-allowed; }
             `}</style>

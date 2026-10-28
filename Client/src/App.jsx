@@ -3,6 +3,7 @@ import { AuthProvider } from './context/AuthContext';
 import MainLayout from './components/MainLayout';
 import Login from './pages/auth/Login';
 import Register from './pages/auth/Register';
+import RegisterBusiness from './pages/auth/RegisterBusiness';
 import Dashboard from './pages/Dashboard';
 import ProductList from './pages/products/ProductList';
 import ProductForm from './pages/products/ProductForm';
@@ -13,6 +14,9 @@ import InvoiceView from './pages/billing/InvoiceView';
 import Customers from './pages/Customers';
 import Accounting from './pages/Accounting';
 import Settings from './pages/Settings';
+import StaffManagement from './pages/settings/StaffManagement';
+import SubscriptionPlans from './pages/settings/SubscriptionPlans';
+import TenantSettings from './pages/settings/TenantSettings';
 import Profile from './pages/auth/Profile';
 
 import { ToastProvider } from './context/ToastContext';
@@ -25,6 +29,7 @@ function App() {
           <Routes>
             <Route path="/login" element={<Login />} />
             <Route path="/register" element={<Register />} />
+            <Route path="/register-business" element={<RegisterBusiness />} />
             <Route element={<MainLayout />}>
               <Route path="/" element={<Navigate to="/dashboard" />} />
               <Route path="/dashboard" element={<Dashboard />} />
@@ -38,6 +43,9 @@ function App() {
               <Route path="/customers" element={<Customers />} />
               <Route path="/accounting" element={<Accounting />} />
               <Route path="/settings" element={<Settings />} />
+              <Route path="/settings/staff" element={<StaffManagement />} />
+              <Route path="/settings/subscription" element={<SubscriptionPlans />} />
+              <Route path="/settings/tenant" element={<TenantSettings />} />
               <Route path="/profile" element={<Profile />} />
             </Route>
           </Routes>

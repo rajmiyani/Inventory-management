@@ -3,15 +3,17 @@ const router = express.Router();
 const Invoice = require('../models/Invoice');
 const Purchase = require('../models/Purchase');
 const verifyToken = require('../middleware/auth.middleware');
+const { requireRole } = require('../middleware/rbac.middleware');
 
-// Apply auth middleware
+// Apply auth middleware & restrict financial accounting from cashiers
 router.use(verifyToken);
+router.use(requireRole(['owner', 'manager']));
 
-// GET Accounting Stats
+// GET Accounting Stats strictly for active tenant
 router.get('/stats', async (req, res) => {
     try {
         const { range } = req.query;
-        let dateFilter = {};
+        let dateFilter = { businessId: req.businessId };
 
         if (range && range !== 'all') {
             const now = new Date();
@@ -41,7 +43,7 @@ router.get('/stats', async (req, res) => {
             }
 
             if (startDate) {
-                dateFilter = { date: { $gte: startDate } };
+                dateFilter.date = { $gte: startDate };
             }
         }
 
@@ -76,7 +78,7 @@ router.get('/stats', async (req, res) => {
 
         const allTransactions = [...incomeTxns, ...expenseTxns]
             .sort((a, b) => new Date(b.date) - new Date(a.date))
-            .slice(0, 20); // More transactions for history view
+            .slice(0, 25);
 
         res.json({
             totalIncome,

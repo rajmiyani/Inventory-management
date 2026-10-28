@@ -13,9 +13,11 @@ const ProductForm = () => {
     const [formData, setFormData] = useState({
         name: '',
         sku: '',
+        hsnCode: '',
         category: '',
         price: '',
         purchasePrice: '',
+        taxRate: 0,
         stock: 0,
         lowStockThreshold: 10,
         unit: 'pcs',
@@ -77,7 +79,7 @@ const ProductForm = () => {
                         />
                     </div>
                     <div className="col-md-6">
-                        <label className="form-label font-medium">SKU (Unique Code)</label>
+                        <label className="form-label font-medium">SKU (Barcode / Unique Code)</label>
                         <input
                             type="text"
                             className="form-control"
@@ -86,7 +88,7 @@ const ProductForm = () => {
                             required
                         />
                     </div>
-                    <div className="col-md-6">
+                    <div className="col-md-4">
                         <label className="form-label font-medium">Category</label>
                         <input
                             type="text"
@@ -95,7 +97,7 @@ const ProductForm = () => {
                             onChange={(e) => setFormData({ ...formData, category: e.target.value })}
                         />
                     </div>
-                    <div className="col-md-6">
+                    <div className="col-md-4">
                         <label className="form-label font-medium">Unit (e.g., pcs, kg, ml)</label>
                         <input
                             type="text"
@@ -105,7 +107,17 @@ const ProductForm = () => {
                         />
                     </div>
                     <div className="col-md-4">
-                        <label className="form-label font-medium">Selling Price</label>
+                        <label className="form-label font-medium">HSN / SAC Code</label>
+                        <input
+                            type="text"
+                            className="form-control"
+                            placeholder="e.g. 8471"
+                            value={formData.hsnCode || ''}
+                            onChange={(e) => setFormData({ ...formData, hsnCode: e.target.value })}
+                        />
+                    </div>
+                    <div className="col-md-4">
+                        <label className="form-label font-medium">Selling Price (Excl. Tax)</label>
                         <div className="input-group">
                             <span className="input-group-text bg-white">₹</span>
                             <input
@@ -128,6 +140,20 @@ const ProductForm = () => {
                                 onChange={(e) => setFormData({ ...formData, purchasePrice: e.target.value })}
                             />
                         </div>
+                    </div>
+                    <div className="col-md-4">
+                        <label className="form-label font-medium">Tax / GST Rate (%)</label>
+                        <select
+                            className="form-select"
+                            value={formData.taxRate || 0}
+                            onChange={(e) => setFormData({ ...formData, taxRate: Number(e.target.value) })}
+                        >
+                            <option value="0">0% (Tax Exempt)</option>
+                            <option value="5">5% GST</option>
+                            <option value="12">12% GST</option>
+                            <option value="18">18% GST</option>
+                            <option value="28">28% GST</option>
+                        </select>
                     </div>
                     <div className="col-md-4">
                         <label className="form-label font-medium">Initial Stock</label>

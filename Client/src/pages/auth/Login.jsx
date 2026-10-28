@@ -72,9 +72,16 @@ const Login = () => {
                     </button>
                 </form>
 
-                <div className="text-center">
-                    <span className="text-secondary text-sm">Don't have an account? </span>
-                    <Link to="/register" className="text-primary text-sm fw-semibold">Register now</Link>
+                <div className="text-center pt-2 border-top">
+                    <p className="text-secondary text-sm mb-1">
+                        Starting a new business store?{' '}
+                        <Link to="/register-business" className="text-primary fw-bold text-decoration-none">
+                            14-Day Free Trial
+                        </Link>
+                    </p>
+                    <span className="text-secondary text-xs">
+                        Cashier / Staff account? Ask your store owner for credentials.
+                    </span>
                 </div>
             </div>
         </div>

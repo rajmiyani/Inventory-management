@@ -3,24 +3,26 @@ const router = express.Router();
 const Product = require('../models/Product');
 const Invoice = require('../models/Invoice');
 const verifyToken = require('../middleware/auth.middleware');
+const { requireRole } = require('../middleware/rbac.middleware');
+const { checkProductLimit } = require('../middleware/subscriptionCheck.middleware');
 
 // Apply auth middleware to all inventory routes
 router.use(verifyToken);
 
-// GET all products
+// GET all products for active tenant
 router.get('/', async (req, res) => {
     try {
-        const products = await Product.find().sort({ createdAt: -1 });
+        const products = await Product.find({ businessId: req.businessId }).sort({ createdAt: -1 });
         res.json(products);
     } catch (error) {
         res.status(500).json({ error: error.message });
     }
 });
 
-// GET inventory insights
+// GET inventory insights strictly for active tenant
 router.get('/insights', async (req, res) => {
     try {
-        const products = await Product.find();
+        const products = await Product.find({ businessId: req.businessId });
 
         const now = new Date();
         const thirtyDaysAgo = new Date();
@@ -28,8 +30,9 @@ router.get('/insights', async (req, res) => {
         const ninetyDaysAgo = new Date();
         ninetyDaysAgo.setDate(now.getDate() - 90);
 
-        // Fetch invoices for the last 90 days
+        // Fetch invoices for this business only
         const invoices = await Invoice.find({
+            businessId: req.businessId,
             date: { $gte: ninetyDaysAgo }
         });
 
@@ -37,6 +40,7 @@ router.get('/insights', async (req, res) => {
 
         invoices.forEach(inv => {
             inv.items.forEach(item => {
+                if (!item.productId) return;
                 const prodId = item.productId.toString();
                 if (!salesData[prodId]) {
                     salesData[prodId] = { lastSale: inv.date, totalQty: 0, recentQty: 0 };
@@ -125,7 +129,7 @@ router.get('/insights', async (req, res) => {
 // GET single product
 router.get('/:id', async (req, res) => {
     try {
-        const product = await Product.findById(req.params.id);
+        const product = await Product.findOne({ _id: req.params.id, businessId: req.businessId });
         if (!product) return res.status(404).json({ error: 'Product not found' });
         res.json(product);
     } catch (error) {
@@ -133,10 +137,20 @@ router.get('/:id', async (req, res) => {
     }
 });
 
-// CREATE new product
-router.post('/', async (req, res) => {
+// CREATE new product (Scoped to businessId + subscription limit check)
+router.post('/', requireRole(['owner', 'manager']), checkProductLimit, async (req, res) => {
     try {
-        const product = new Product(req.body);
+        const { sku } = req.body;
+        // Verify unique SKU within this business
+        const existingSku = await Product.findOne({ businessId: req.businessId, sku });
+        if (existingSku) {
+            return res.status(400).json({ error: `SKU / Barcode '${sku}' is already in use in your store` });
+        }
+
+        const product = new Product({
+            ...req.body,
+            businessId: req.businessId
+        });
         await product.save();
         res.status(201).json(product);
     } catch (error) {
@@ -145,9 +159,14 @@ router.post('/', async (req, res) => {
 });
 
 // UPDATE product
-router.put('/:id', async (req, res) => {
+router.put('/:id', requireRole(['owner', 'manager']), async (req, res) => {
     try {
-        const product = await Product.findByIdAndUpdate(req.params.id, req.body, { new: true });
+        const product = await Product.findOneAndUpdate(
+            { _id: req.params.id, businessId: req.businessId },
+            req.body,
+            { new: true }
+        );
+        if (!product) return res.status(404).json({ error: 'Product not found' });
         res.json(product);
     } catch (error) {
         res.status(500).json({ error: error.message });
@@ -155,15 +174,14 @@ router.put('/:id', async (req, res) => {
 });
 
 // DELETE product
-router.delete('/:id', async (req, res) => {
+router.delete('/:id', requireRole(['owner', 'manager']), async (req, res) => {
     try {
-        await Product.findByIdAndDelete(req.params.id);
-        res.json({ message: 'Product deleted' });
+        const result = await Product.findOneAndDelete({ _id: req.params.id, businessId: req.businessId });
+        if (!result) return res.status(404).json({ error: 'Product not found' });
+        res.json({ message: 'Product deleted successfully' });
     } catch (error) {
         res.status(500).json({ error: error.message });
     }
 });
-
-module.exports = router;
 
 module.exports = router;
